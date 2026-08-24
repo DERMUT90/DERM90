@@ -1479,6 +1479,7 @@ OUTPUT JSON ONLY (NO MARKDOWN):
 
 MINIMUM_CONFLUENCE_SCORE = 70
 ANALYSIS_INTERVAL_MINUTES = 5
+AI_ANALYSIS_INTERVAL_MINUTES = 30
 NEWS_PRE_WINDOW_HOURS = 2
 
 # ── Page Config ──────────────────────────────────────────────────────────────
@@ -1510,6 +1511,7 @@ def render_countdown_timer():
 # ── Initialize Session State ──────────────────────────────────────────────────
 if 'bot_running' not in st.session_state: st.session_state.bot_running = False
 if 'last_analysis_time' not in st.session_state: st.session_state.last_analysis_time = None
+if 'last_ai_analysis_time' not in st.session_state: st.session_state.last_ai_analysis_time = None
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
 if 'next_check_time' not in st.session_state: st.session_state.next_check_time = None
 if 'active_signals' not in st.session_state: st.session_state.active_signals = {}
@@ -1568,6 +1570,11 @@ def add_notification(note_type, message, symbol=None, signal=None, score=None):
     st.session_state.unread_count = sum(1 for n in st.session_state.notifications if not n.get('read', False))
     return notification
 
+def get_analysis_source(result):
+    if isinstance(result, dict) and result.get('model_used'):
+        return f"AI ({result['model_used']})"
+    return (result.get('analysis_source') if isinstance(result, dict) else None) or 'Python fallback'
+
 def get_notifications():
     if 'notifications' not in st.session_state:
         st.session_state.notifications = []
@@ -1622,6 +1629,7 @@ def build_telegram_signal_message(symbol, result):
 
     signal = normalize_ai_signal(result.get('signal'))
     signal = _escape_telegram_html(signal)
+    analysis_source = _escape_telegram_html(get_analysis_source(result))
 
     reasoning = _escape_telegram_html(result.get('reasoning'))
     order_type = _escape_telegram_html(result.get('order_type', 'MARKET'))
@@ -1633,6 +1641,7 @@ def build_telegram_signal_message(symbol, result):
         f"⏰ Time: {_escape_telegram_html(event_time)}\n"
         f"📈 Score: {score}/100\n"
         f"🧾 Order: {order_type}\n"
+        f"🤖 Analysis: {analysis_source}\n"
         f"💰 Entry: {_escape_telegram_html(result.get('entry'))} | 🛑 SL: {_escape_telegram_html(result.get('stop_loss'))} | 🎯 TP: {_escape_telegram_html(tp_value)}\n"
         f"📈 DXY: {_escape_telegram_html(result.get('dxy_correlation'))}\n"
         f"🧠 {reasoning}"
@@ -3508,6 +3517,7 @@ def analyze_symbol_premium(symbol, all_data, news_override=None):
                 analysis = build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             analysis = normalize_analysis_signals(analysis)
         analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
+        analysis['analysis_source'] = get_analysis_source(analysis)
         # ── NEWS SIGNAL PATH: direction-only, skip entry/SL/TP enforcement ──
         if news_override:
             analysis['structural_score'] = structural_context['structural_score']
@@ -4149,7 +4159,7 @@ st.title("🌍 Der-AI | Quantitative Macro System")
 st.markdown("**DXY Correlation | VWAP Microstructure | Pre-News Positioning | Telegram Bridge**")
 st.sidebar.header("⚙️ System Configuration")
 selected_symbols = st.sidebar.multiselect("Monitor Symbols", SYMBOLS, default=['XAUUSD', 'EURUSD', 'BTCUSD', 'US30'])
-st.sidebar.info(f"Analysis interval is fixed at {ANALYSIS_INTERVAL_MINUTES} minutes.")
+st.sidebar.info(f"Python fallback: every {ANALYSIS_INTERVAL_MINUTES} minutes | AI analysis: every {AI_ANALYSIS_INTERVAL_MINUTES} minutes.")
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Signal Sensitivity")
 st.sidebar.caption(f"Signals are only accepted when the AI score reaches at least {MINIMUM_CONFLUENCE_SCORE}/100.")
@@ -4209,9 +4219,11 @@ with tab1:
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.markdown("""
+                last_ai_run = st.session_state.get('last_ai_analysis_time')
+                banner_source = 'AI (Gemini)' if last_ai_run is None or (datetime.now() - last_ai_run).total_seconds() >= AI_ANALYSIS_INTERVAL_MINUTES * 60 else 'Python fallback'
+                st.markdown(f"""
                 <div style="background: linear-gradient(90deg, #059669 0%, #10b981 100%); color: white; padding: 20px; border-radius: 12px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px;">
-                    <h2 style="margin: 0; font-size: 1.5em; font-weight: bold;">🔄 Running Live Analysis Now...</h2>
+                    <h2 style="margin: 0; font-size: 1.5em; font-weight: bold;">🔄 Running analysis: {banner_source}</h2>
                     <p style="margin: 5px 0 0 0; opacity: 0.9;">Fetching latest multi-timeframe data...</p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -4232,8 +4244,9 @@ with tab1:
             add_notification('warning', msg, symbol=symbol)
             return
         result['symbol'] = result.get('symbol') or symbol
+        analysis_source = get_analysis_source(result)
         summary_reason = (result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason') or result.get('error') or 'No additional details provided.')
-        add_notification('info', f"🧠 **{symbol}**: AI analysis complete. Signal: {result.get('signal', 'N/A')} | Confidence: {result.get('confidence', 'N/A')} | Score: {result.get('confluence_score', 'N/A')}/100. Reason: {summary_reason}", symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
+        add_notification('info', f"🧠 **{symbol}**: {analysis_source} complete. Signal: {result.get('signal', 'N/A')} | Confidence: {result.get('confidence', 'N/A')} | Score: {result.get('confluence_score', 'N/A')}/100. Reason: {summary_reason}", symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
         if result.get('rejection_reason') == 'RATE_LIMIT':
             st.session_state.rate_limit_hit = True
             next_retry = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
@@ -4264,7 +4277,7 @@ with tab1:
         if result.get('signal') == 'WAIT':
             ai_reason = result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason', 'Market conditions do not meet high-confidence criteria.')
             detail = result.get('validation_detail', '')
-            msg = f"⚪ **{symbol}**: No Trade (WAIT). AI Reason: {ai_reason}"
+            msg = f"⚪ **{symbol}**: No Trade (WAIT). {analysis_source} Reason: {ai_reason}"
             if detail:
                 msg += f" | Structural Detail: {detail}"
             if not is_auto:
@@ -4275,7 +4288,7 @@ with tab1:
         is_valid_math, math_reason = validate_signal_math(result, pair_config=pair_config)
         if not is_valid_math:
             detail = result.get('validation_detail', '')
-            msg = f"⚪ **{symbol}**: Signal Rejected. AI Reason: {math_reason}"
+            msg = f"⚪ **{symbol}**: Signal Rejected. {analysis_source} Reason: {math_reason}"
             if detail:
                 msg += f" | Structural Detail: {detail}"
             if not is_auto:
@@ -4346,7 +4359,7 @@ with tab1:
                 add_notification('info', f"🧭 **{symbol}**: Candidate setup detected with score {combined_score}/100; awaiting confirmation.", symbol=symbol, signal=result.get('signal'), score=combined_score)
         else:
             ai_reason = result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason', 'Low confidence or DXY contradiction')
-            msg = f"⚪ **{symbol}**: Signal Rejected. Score: {result.get('confluence_score', 0)}/100, Confidence: {result.get('confidence', 'N/A')}. AI Reason: {ai_reason}"
+            msg = f"⚪ **{symbol}**: Signal Rejected. Score: {result.get('confluence_score', 0)}/100, Confidence: {result.get('confidence', 'N/A')}. {analysis_source} Reason: {ai_reason}"
             if not is_auto:
                 st.info(msg)
             add_notification('warning', msg, symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
@@ -4405,6 +4418,7 @@ def _local_fallback(symbol, all_data):
             learning=learn_local,
             historical_context=historical_context_local
         )
+        result['analysis_source'] = 'Python fallback'
 
         if result.get('signal') in ('BUY', 'SELL'):
             live_local = get_live_market_snapshot(
@@ -4430,7 +4444,8 @@ def _local_fallback(symbol, all_data):
         'signal': 'WAIT',
         'confidence': 'LOW',
         'confluence_score': MINIMUM_CONFLUENCE_SCORE,
-        'rejection_reason': 'Data unavailable for fallback'
+        'rejection_reason': 'Data unavailable for fallback',
+        'analysis_source': 'Python fallback'
     }
 
 if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.session_state.bot_running):
@@ -4440,6 +4455,7 @@ if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.sessio
         else:
             progress_bar = st.progress(0)
             st.session_state.rate_limit_hit = False
+            ai_analysis_completed = False
             all_data = load_market_data(force_refresh=False)
             for i, symbol in enumerate(selected_symbols):
                 next_pair = selected_symbols[i + 1] if i + 1 < len(selected_symbols) else None
@@ -4457,6 +4473,7 @@ if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.sessio
                     render_analysis_status(status_placeholder)
                     with st.spinner(f"Analyzing {symbol} with DXY Correlation..."):
                         result = analyze_symbol_premium(symbol, all_data, news_override=None)
+                        ai_analysis_completed = ai_analysis_completed or bool(result.get('model_used'))
                     set_cached_analysis(symbol, result)
                     try:
                         process_symbol_result(result, symbol, is_auto=False, all_data=all_data)
@@ -4467,6 +4484,8 @@ if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.sessio
                 progress_bar.progress((i + 1) / len(selected_symbols))
             progress_bar.empty()
             st.session_state.last_analysis_time = datetime.now()
+            if ai_analysis_completed and not st.session_state.get('rate_limit_hit', False):
+                st.session_state.last_ai_analysis_time = datetime.now()
             st.session_state.next_check_time = datetime.now() + timedelta(minutes=ANALYSIS_INTERVAL_MINUTES)
             add_notification('info', f"✅ Analysis run complete. Next run at {st.session_state.next_check_time.strftime('%H:%M:%S')}.")
     except Exception as e:
@@ -4488,32 +4507,43 @@ if st.session_state.bot_running:
             st.sidebar.info(f"⏳ Next scheduled analysis in {int(time_left)}s - keep this page open.")
         elif is_scheduled_run_due():
             scheduled_start = st.session_state.next_check_time or datetime.now()
+            last_ai_run = st.session_state.get('last_ai_analysis_time')
+            ai_due = last_ai_run is None or (datetime.now() - last_ai_run).total_seconds() >= AI_ANALYSIS_INTERVAL_MINUTES * 60
+            use_ai_cycle = ai_due and not is_gpt_rate_limited()
             if is_gpt_rate_limited():
                 add_notification('warning', '⏳ Gemini rate limit in effect - using cached/fallback analysis this cycle.')
             st.session_state.analysis_in_progress = True
             st.session_state.analysis_started_at = datetime.now()
             try:
-                update_analysis_status(symbol='SYSTEM', message='Running scheduled analysis...')
+                cycle_source = 'AI (Gemini)' if use_ai_cycle else 'Python fallback'
+                update_analysis_status(symbol='SYSTEM', message=f'Running scheduled analysis with {cycle_source}...')
                 render_analysis_status(status_placeholder)
                 progress_bar = st.progress(0)
                 st.session_state.rate_limit_hit = False
+                ai_analysis_completed = False
                 all_data = load_market_data(force_refresh=False)
                 for i, symbol in enumerate(selected_symbols):
                     next_pair = selected_symbols[i + 1] if i + 1 < len(selected_symbols) else None
-                    if st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited():
-                        add_notification('warning', '⏳ Rate limit reached. Using cached/fallback analysis for this symbol.', symbol=symbol)
-                        cached_result = get_cached_analysis(symbol)
+                    if not use_ai_cycle or st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited():
+                        if not use_ai_cycle:
+                            add_notification('info', '🐍 5-minute cycle: using Python fallback analysis for this symbol.', symbol=symbol)
+                        else:
+                            add_notification('warning', '⏳ Rate limit reached. Using cached/fallback analysis for this symbol.', symbol=symbol)
+                        cached_result = get_cached_analysis(symbol) if is_gpt_rate_limited() else None
                         result = cached_result if cached_result is not None else _local_fallback(symbol, all_data)
-                        update_analysis_status(symbol=symbol, message=f"Rate-limited: cached/fallback analysis for {symbol}", next_pair=next_pair)
+                        if cached_result is not None:
+                            result['analysis_source'] = get_analysis_source(result)
+                        update_analysis_status(symbol=symbol, message=f"Running analysis with {get_analysis_source(result)} for {symbol}", next_pair=next_pair)
                         render_analysis_status(status_placeholder)
                         try:
                             process_symbol_result(result, symbol, is_auto=True, all_data=all_data)
                         except Exception as proc_exc:
                             add_notification('warning', f"❌ {symbol}: result processing failed: {proc_exc}", symbol=symbol)
                     else:
-                        update_analysis_status(symbol=symbol, message=f"Starting scheduled analysis for {symbol}", next_pair=next_pair)
+                        update_analysis_status(symbol=symbol, message=f"Running analysis with AI (Gemini) for {symbol}", next_pair=next_pair)
                         render_analysis_status(status_placeholder)
                         result = analyze_symbol_premium(symbol, all_data, news_override=None)
+                        ai_analysis_completed = ai_analysis_completed or bool(result.get('model_used'))
                         set_cached_analysis(symbol, result)
                         try:
                             process_symbol_result(result, symbol, is_auto=True, all_data=all_data)
@@ -4527,12 +4557,14 @@ if st.session_state.bot_running:
                 fresh_news = get_high_impact_news(selected_symbols=selected_symbols, reference_dt=now_utc)
                 sync_news_event_statuses(fresh_news, selected_symbols=selected_symbols)
                 target_event = pick_news_event_for_analysis(fresh_news, now_utc)
-                if target_event and not (st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited()):
+                if use_ai_cycle and target_event and not (st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited()):
                     add_notification('info', f"📰 Running pre-news impact analysis for: {target_event.get('event')} ({target_event.get('time')})...")
                     update_analysis_status(symbol='NEWS', message=f"Pre-news analysis: {target_event.get('event')}")
                     render_analysis_status(status_placeholder)
                     run_news_analysis_cycle(target_event, all_data, selected_symbols)
                 st.session_state.last_analysis_time = datetime.now()
+                if ai_analysis_completed and not st.session_state.get('rate_limit_hit', False):
+                    st.session_state.last_ai_analysis_time = datetime.now()
                 st.session_state.next_check_time = scheduled_start + timedelta(minutes=ANALYSIS_INTERVAL_MINUTES)
                 add_notification('info', f"✅ Scheduled analysis complete. Next run at {st.session_state.next_check_time.strftime('%H:%M:%S')}.")
             finally:
@@ -4550,7 +4582,7 @@ with tab2:
                 col_a.metric("Entry", signal.get('entry', 'N/A'))
                 col_b.metric("Stop Loss", signal.get('stop_loss', 'N/A'))
                 col_c.metric("Take Profit", signal.get('take_profit', ['N/A'])[0] if signal.get('take_profit') else 'N/A')
-                st.write(f"**Bias:** {signal.get('bias')} | **Confidence:** {signal.get('confidence')}")
+                st.write(f"**Analysis:** {get_analysis_source(signal)} | **Bias:** {signal.get('bias')} | **Confidence:** {signal.get('confidence')}")
                 st.write(f"**DXY Correlation:** {signal.get('dxy_correlation', 'N/A')}")
                 st.write(f"**Reasoning:** {signal.get('reasoning')}")
                 st.markdown("---")
