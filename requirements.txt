@@ -1,0 +1,7 @@
+   streamlit
+   requests
+   yfinance
+   pandas
+   numpy
+   python-telegram-bot
+   schedule
