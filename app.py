@@ -2292,7 +2292,8 @@ def run_news_analysis_cycle(event, all_data, symbols):
 GROQ_MIN_REQUEST_INTERVAL = 3
 GROQ_TOKEN_LIMIT_PER_MINUTE = 500000
 GROQ_ESTIMATED_RESPONSE_TOKENS = 5000
-GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant']
+GROQ_MODELS = ['qwen/qwen3.6-27b', 'openai/gpt-oss-120b']
+
 
 def estimate_tokens_for_text(text):
     return max(1, int(len(text) / 4))
