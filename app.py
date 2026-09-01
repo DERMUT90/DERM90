@@ -2088,11 +2088,11 @@ def update_news_event_status(event, status, detail=None):
     st.session_state.news_event_statuses[event_id] = {'event': event.get('event'), 'currency': event.get('currency'), 'time': event.get('time'), 'status': status, 'detail': detail or ''}
 
 # ── Dedicated Pre-News Impact Engine (sent ONCE, >=2h ahead, Calendar+Telegram only) ──
-def wait_for_GEMINI_spacing():
+def wait_for_GROQ_spacing():
     if st.session_state.last_gpt_request_time:
         delta = (datetime.now() - st.session_state.last_gpt_request_time).total_seconds()
-        if delta < GEMINI_MIN_REQUEST_INTERVAL:
-            time.sleep(GEMINI_MIN_REQUEST_INTERVAL - delta)
+        if delta < GROQ_MIN_REQUEST_INTERVAL:
+            time.sleep(GROQ_MIN_REQUEST_INTERVAL - delta)
 
 def pick_news_event_for_analysis(news_events, now):
     best = None
@@ -2215,7 +2215,7 @@ def run_news_analysis_cycle(event, all_data, symbols):
     results = {}
 
     for symbol in symbols:
-        wait_for_GEMINI_spacing()
+        wait_for_GROQ_spacing()
 
         analysis = analyze_symbol_premium(symbol, all_data, news_override=[event])
 
@@ -2228,7 +2228,7 @@ def run_news_analysis_cycle(event, all_data, symbols):
             continue
 
         if analysis.get('rejection_reason') == 'RATE_LIMIT':
-            results[symbol] = {'signal': 'SKIPPED', 'reason': 'Gemini rate limit'}
+            results[symbol] = {'signal': 'SKIPPED', 'reason': 'Groq rate limit'}
             continue
 
         results[symbol] = sanitize_news_event_analysis(analysis)
@@ -2288,18 +2288,18 @@ def run_news_analysis_cycle(event, all_data, symbols):
 
     return True
 
-# ── Gemini / Rate Limits ────────────────────────────────────────────────────────
-GEMINI_MIN_REQUEST_INTERVAL = 3
-GEMINI_TOKEN_LIMIT_PER_MINUTE = 500000
-GEMINI_ESTIMATED_RESPONSE_TOKENS = 5000
-GEMINI_MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest']
+# ── Groq / Rate Limits ────────────────────────────────────────────────────────
+GROQ_MIN_REQUEST_INTERVAL = 3
+GROQ_TOKEN_LIMIT_PER_MINUTE = 500000
+GROQ_ESTIMATED_RESPONSE_TOKENS = 5000
+GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant']
 
 def estimate_tokens_for_text(text):
     return max(1, int(len(text) / 4))
 
 def estimate_analysis_tokens(system_prompt, user_content):
     prompt_text = system_prompt + ' ' + ' '.join([item.get('text', '') for item in user_content])
-    return estimate_tokens_for_text(prompt_text) + GEMINI_ESTIMATED_RESPONSE_TOKENS
+    return estimate_tokens_for_text(prompt_text) + GROQ_ESTIMATED_RESPONSE_TOKENS
 
 def format_duration(seconds):
     return f"{int(seconds) // 60}m {int(seconds) % 60}s"
@@ -2312,10 +2312,10 @@ def reserve_gpt_tokens(estimated_tokens):
         st.session_state.gpt_tokens_used = 0
     if estimated_tokens is None:
         estimated_tokens = 0
-    if st.session_state.gpt_tokens_used + estimated_tokens > GEMINI_TOKEN_LIMIT_PER_MINUTE:
+    if st.session_state.gpt_tokens_used + estimated_tokens > GROQ_TOKEN_LIMIT_PER_MINUTE:
         next_reset = st.session_state.gpt_token_window_start + timedelta(minutes=1)
         st.session_state.gpt_rate_limit_until = next_reset
-        st.session_state.gpt_rate_limit_reason = f"Token budget exceeded: {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
+        st.session_state.gpt_rate_limit_reason = f"Token budget exceeded: {st.session_state.gpt_tokens_used}/{GROQ_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
         return False
     st.session_state.gpt_rate_limit_reason = ''
     st.session_state.gpt_tokens_used += estimated_tokens
@@ -2336,9 +2336,9 @@ def render_analysis_status(container):
         lines.append(f"**Estimated Duration:** {format_duration(status.get('estimated_duration'))}")
     if status.get('next_pair'):
         lines.append(f"**Next Pair:** {status.get('next_pair')}")
-    lines.append(f"**Tokens used this window:** {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE}")
+    lines.append(f"**Tokens used this window:** {st.session_state.gpt_tokens_used}/{GROQ_TOKEN_LIMIT_PER_MINUTE}")
     if st.session_state.gpt_rate_limit_until:
-        lines.append(f"**Gemini cooldown until:** {st.session_state.gpt_rate_limit_until.strftime('%H:%M:%S')}")
+        lines.append(f"**Groq cooldown until:** {st.session_state.gpt_rate_limit_until.strftime('%H:%M:%S')}")
     container.markdown("\n".join(lines))
 
 def is_scheduled_run_due():
@@ -2390,33 +2390,33 @@ MARKET_ANALYSIS_PROMPT = build_market_analysis_prompt()
 NEWS_ANALYSIS_PROMPT = build_news_analysis_prompt()
 
 def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None):
-    api_key = get_secret("GEMINI_API_KEY", "")
-    if not api_key or not (api_key.startswith("AIza") or api_key.startswith("AQ.")):
-        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "Missing Gemini API Key.", "estimated_tokens": estimated_tokens}
+    api_key = get_secret("GROQ_API_KEY", "")
+    if not api_key or not (str(api_key).strip().startswith(("gsk_", "groq_"))):
+        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "Missing Groq API Key.", "estimated_tokens": estimated_tokens}
     if estimated_tokens is None:
         estimated_tokens = estimate_analysis_tokens(system_prompt, user_content)
     if not reserve_gpt_tokens(estimated_tokens):
-        retry_time = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
+        retry_time = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GROQ_MIN_REQUEST_INTERVAL))
         st.session_state.gpt_rate_limit_until = retry_time
         return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    for model in GEMINI_MODELS:
+    for model in GROQ_MODELS:
         try:
             if is_gpt_rate_limited():
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "estimated_tokens": estimated_tokens}
             time_since_last = (datetime.now() - st.session_state.last_gpt_request_time).total_seconds() if st.session_state.last_gpt_request_time else None
-            if time_since_last is not None and time_since_last < GEMINI_MIN_REQUEST_INTERVAL:
-                wait_time = int(GEMINI_MIN_REQUEST_INTERVAL - time_since_last)
+            if time_since_last is not None and time_since_last < GROQ_MIN_REQUEST_INTERVAL:
+                wait_time = int(GROQ_MIN_REQUEST_INTERVAL - time_since_last)
                 st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
-                st.session_state.gpt_rate_limit_reason = f"Minimum request spacing not met. Wait {wait_time}s before the next Gemini call."
+                st.session_state.gpt_rate_limit_reason = f"Minimum request spacing not met. Wait {wait_time}s before the next Groq call."
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
-            payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}], "max_tokens": max_tokens, "temperature": 0.1}
-            res = requests.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload, timeout=90)
+            payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": ("".join((str(part.get("text", "")) if isinstance(part, dict) and part.get("type") == "text" else (str(part) if isinstance(part, str) else "")) for part in user_content) if isinstance(user_content, list) else user_content)}], "max_tokens": max_tokens, "temperature": 0.1}
+            res = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=90)
             st.session_state.last_gpt_request_time = datetime.now()
             if res.status_code == 429:
                 retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
                 st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
-                st.session_state.gpt_rate_limit_reason = f"Gemini 429 rate limit from API response. Retry after {retry_after}s."
+                st.session_state.gpt_rate_limit_reason = f"Groq 429 rate limit from API response. Retry after {retry_after}s."
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
             if res.status_code in (400, 404) and 'model' in res.text.lower():
                 continue
@@ -2453,10 +2453,10 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
         except json.JSONDecodeError:
             continue
         except Exception as e:
-            if model == GEMINI_MODELS[-1]:
+            if model == GROQ_MODELS[-1]:
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": f"Error: {str(e)}", "estimated_tokens": estimated_tokens}
             continue
-    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "Error: all Gemini models failed.", "estimated_tokens": estimated_tokens}
+    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "Error: all Groq models failed.", "estimated_tokens": estimated_tokens}
 
 # ── Level Enforcement ─────────────────────────────────────────────────────────
 def round_price(price, pair_config):
@@ -3501,7 +3501,7 @@ def analyze_symbol_premium(symbol, all_data, news_override=None):
         analysis['setup_context'] = setup_context
         analysis['market_state'] = analysis.get('market_state') or setup_context['setup_type']
         update_market_state(analysis.get('market_state') or setup_context['setup_type'])
-        if analysis.get('signal') == 'WAIT' and analysis.get('rejection_reason') in {'Missing Gemini API Key.', 'RATE_LIMIT', 'PARSE_ERROR'}:
+        if analysis.get('signal') == 'WAIT' and analysis.get('rejection_reason') in {'Missing Groq API Key.', 'RATE_LIMIT', 'PARSE_ERROR'}:
             if news_override:
                 analysis = build_pre_news_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             else:
@@ -3798,7 +3798,7 @@ def build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context
                                    picture=None, firm=None, firm_notes=None, learning=None, historical_context=None):
     if not st.session_state.get("_upgrade_fallback_warned"):
         try:
-            add_notification("warning", "Gemini AI is unavailable (missing API key or rate-limited). Signals are coming from the Python fallback model. Verify GEMINI_API_KEY in Streamlit Secrets for full-quality institutional analysis.")
+            add_notification("warning", "Groq AI is unavailable (missing API key or rate-limited). Signals are coming from the Python fallback model. Verify GROQ_API_KEY in Streamlit Secrets for full-quality institutional analysis.")
         except Exception:
             pass
         st.session_state._upgrade_fallback_warned = True
@@ -4132,9 +4132,9 @@ def get_live_market_snapshot(symbol, yf_symbol, fallback_df=None):
 _orig_call_gpt = call_gpt
 def call_gpt(system_prompt, user_content, max_tokens=2000, retry_count=0, estimated_tokens=None):
     try:
-        sym = st.session_state.get("_snapshot_symbol")
+        sym = None  # Groq migration: chart image injection disabled for text-only Groq models
         img = st.session_state.get("_snapshot_" + sym) if sym else None
-        if img and isinstance(user_content, list):
+        if False and img and isinstance(user_content, list):  # Groq migration: image injection disabled
             has_img = any(isinstance(p, dict) and p.get("type") == "image_url" for p in user_content)
             if not has_img:
                 user_content = user_content + [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + img}}]
@@ -4236,10 +4236,10 @@ with tab1:
         add_notification('info', f"🧠 **{symbol}**: AI analysis complete. Signal: {result.get('signal', 'N/A')} | Confidence: {result.get('confidence', 'N/A')} | Score: {result.get('confluence_score', 'N/A')}/100. Reason: {summary_reason}", symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
         if result.get('rejection_reason') == 'RATE_LIMIT':
             st.session_state.rate_limit_hit = True
-            next_retry = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
+            next_retry = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GROQ_MIN_REQUEST_INTERVAL))
             st.session_state.next_check_time = next_retry
-            reason = result.get('rate_limit_reason') or 'Gemini is currently unavailable.'
-            msg = f"⏳ **{symbol}**: Gemini rate limit active. {reason} Pausing analysis until {next_retry.strftime('%H:%M:%S')} to protect API quota."
+            reason = result.get('rate_limit_reason') or 'Groq is currently unavailable.'
+            msg = f"⏳ **{symbol}**: Groq rate limit active. {reason} Pausing analysis until {next_retry.strftime('%H:%M:%S')} to protect API quota."
             if not is_auto:
                 st.warning(msg)
             add_notification('warning', msg, symbol=symbol)
@@ -4436,7 +4436,7 @@ def _local_fallback(symbol, all_data):
 if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.session_state.bot_running):
     try:
         if is_gpt_rate_limited():
-            st.warning("⏳ Gemini rate limit in effect. Please wait before running another analysis.")
+            st.warning("⏳ Groq rate limit in effect. Please wait before running another analysis.")
         else:
             progress_bar = st.progress(0)
             st.session_state.rate_limit_hit = False
@@ -4463,7 +4463,7 @@ if st.button("🔍 Run Macro Analysis Now", type="secondary", disabled=st.sessio
                     except Exception as proc_exc:
                         add_notification('warning', f"❌ {symbol}: result processing failed: {proc_exc}", symbol=symbol)
                 if i < len(selected_symbols) - 1:
-                    time.sleep(GEMINI_MIN_REQUEST_INTERVAL)
+                    time.sleep(GROQ_MIN_REQUEST_INTERVAL)
                 progress_bar.progress((i + 1) / len(selected_symbols))
             progress_bar.empty()
             st.session_state.last_analysis_time = datetime.now()
@@ -4489,7 +4489,7 @@ if st.session_state.bot_running:
         elif is_scheduled_run_due():
             scheduled_start = st.session_state.next_check_time or datetime.now()
             if is_gpt_rate_limited():
-                add_notification('warning', '⏳ Gemini rate limit in effect - using cached/fallback analysis this cycle.')
+                add_notification('warning', '⏳ Groq rate limit in effect - using cached/fallback analysis this cycle.')
             st.session_state.analysis_in_progress = True
             st.session_state.analysis_started_at = datetime.now()
             try:
@@ -4520,7 +4520,7 @@ if st.session_state.bot_running:
                         except Exception as proc_exc:
                             add_notification('warning', f"❌ {symbol}: result processing failed: {proc_exc}", symbol=symbol)
                     if i < len(selected_symbols) - 1 and not (st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited()):
-                        time.sleep(GEMINI_MIN_REQUEST_INTERVAL)
+                        time.sleep(GROQ_MIN_REQUEST_INTERVAL)
                     progress_bar.progress((i + 1) / len(selected_symbols))
                 progress_bar.empty()
                 now_utc = datetime.now(timezone.utc)
@@ -4662,7 +4662,7 @@ with tab5:
     """)
     st.subheader("🎯 Quality Filters")
     st.info(f"""**Current Active Settings:**
-- AI Model: **gemini-2.0-flash** (falls back to gemini-1.5-flash)
+- AI Model: **llama-3.3-70b-versatile** (falls back to llama-3.1-8b-instant)
 - Minimum Confluence Score: **{MINIMUM_CONFLUENCE_SCORE}/100**
 - **Firm Desk Bias with Hysteresis:** HTF-first standing bias ({BIAS_MIN_HOLD_MINUTES}-min hold) prevents BUY↔SELL flip-flopping; flips require a real H1/H4 structural break with strong evidence.
 - **Cooldown:** a good setup is not re-signalled for **30 minutes**.
