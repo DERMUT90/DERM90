@@ -1527,7 +1527,7 @@ if 'last_gpt_request_time' not in st.session_state: st.session_state.last_gpt_re
 if 'gpt_tokens_used' not in st.session_state: st.session_state.gpt_tokens_used = 0
 if 'gpt_token_window_start' not in st.session_state: st.session_state.gpt_token_window_start = datetime.now()
 if 'analysis_status' not in st.session_state:
-    st.session_state.analysis_status = {'current_pair': None, 'message': None, 'estimated_tokens': None, 'estimated_duration': None}
+    st.session_state.analysis_status = {'current_pair': None, 'message': None, 'estimated_tokens': None, 'estimated_duration': None, 'mode': None}
 if 'news_event_statuses' not in st.session_state: st.session_state.news_event_statuses = {}
 if 'active_news_event' not in st.session_state: st.session_state.active_news_event = None
 if 'news_signal_sent' not in st.session_state: st.session_state.news_signal_sent = {}
@@ -2326,8 +2326,8 @@ def reserve_gpt_tokens(estimated_tokens):
     st.session_state.gpt_tokens_used += estimated_tokens
     return True
 
-def update_analysis_status(symbol=None, message=None, estimated_tokens=None, estimated_duration=None, next_pair=None):
-    st.session_state.analysis_status = {'current_pair': symbol, 'message': message, 'estimated_tokens': estimated_tokens, 'estimated_duration': estimated_duration, 'next_pair': next_pair}
+def update_analysis_status(symbol=None, message=None, estimated_tokens=None, estimated_duration=None, next_pair=None, mode=None):
+    st.session_state.analysis_status = {'current_pair': symbol, 'message': message, 'estimated_tokens': estimated_tokens, 'estimated_duration': estimated_duration, 'next_pair': next_pair, 'mode': mode}
 
 def render_analysis_status(container):
     status = st.session_state.get('analysis_status', {})
@@ -2335,15 +2335,17 @@ def render_analysis_status(container):
         container.markdown("**Analysis status:** idle. Waiting for the next scheduled run or manual start.")
         return
     lines = [f"**Current Pair:** {status.get('current_pair')}", f"**Status:** {status.get('message', 'Running')}"]
-    if status.get('estimated_tokens') is not None:
+    if status.get('mode') == 'gemini' and status.get('estimated_tokens') is not None:
         lines.append(f"**Estimated Tokens:** {status.get('estimated_tokens')}")
     if status.get('estimated_duration') is not None:
         lines.append(f"**Estimated Duration:** {format_duration(status.get('estimated_duration'))}")
     if status.get('next_pair'):
         lines.append(f"**Next Pair:** {status.get('next_pair')}")
-    lines.append(f"**Tokens used this window:** {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE}")
-    if st.session_state.gpt_rate_limit_until:
+    lines.append(f"**Gemini tokens used this window:** {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE}")
+    if status.get('mode') == 'gemini' and st.session_state.gpt_rate_limit_until:
         lines.append(f"**Gemini cooldown until:** {st.session_state.gpt_rate_limit_until.strftime('%H:%M:%S')}")
+    elif status.get('mode') == 'python':
+        lines.append("**Gemini request this cycle:** none; Python fallback only.")
     container.markdown("\n".join(lines))
 
 def is_scheduled_run_due():
@@ -2400,10 +2402,6 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
         return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "Missing Gemini API Key.", "model_used": "Gemini unavailable", "estimated_tokens": estimated_tokens}
     if estimated_tokens is None:
         estimated_tokens = estimate_analysis_tokens(system_prompt, user_content)
-    if not reserve_gpt_tokens(estimated_tokens):
-        retry_time = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
-        st.session_state.gpt_rate_limit_until = retry_time
-        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     for model in GEMINI_MODELS:
         try:
@@ -2414,6 +2412,10 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
                 wait_time = int(GEMINI_MIN_REQUEST_INTERVAL - time_since_last)
                 st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
                 st.session_state.gpt_rate_limit_reason = f"Minimum request spacing not met. Wait {wait_time}s before the next Gemini call."
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
+            if not reserve_gpt_tokens(estimated_tokens):
+                retry_time = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
+                st.session_state.gpt_rate_limit_until = retry_time
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW", "rejection_reason": "RATE_LIMIT", "rate_limit_reason": st.session_state.gpt_rate_limit_reason, "estimated_tokens": estimated_tokens}
             payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}], "max_tokens": max_tokens, "temperature": 0.1}
             res = requests.post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", headers=headers, json=payload, timeout=90)
@@ -3508,11 +3510,13 @@ def analyze_symbol_premium(symbol, all_data, news_override=None):
         analysis['market_state'] = analysis.get('market_state') or setup_context['setup_type']
         update_market_state(analysis.get('market_state') or setup_context['setup_type'])
         if analysis.get('signal') == 'WAIT' and analysis.get('rejection_reason') in {'Missing Gemini API Key.', 'RATE_LIMIT', 'PARSE_ERROR'}:
+            gemini_failure = analysis.get('rejection_reason')
             if news_override:
                 analysis = build_pre_news_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             else:
                 analysis = build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             analysis = normalize_analysis_signals(analysis)
+            analysis['gemini_failure'] = gemini_failure
         analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
         # ── NEWS SIGNAL PATH: direction-only, skip entry/SL/TP enforcement ──
         if news_override:
@@ -4244,6 +4248,8 @@ with tab1:
         model_label = result['model_used']
         summary_reason = (result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason') or result.get('error') or 'No additional details provided.')
         add_notification('info', f"🧠 **{symbol}**: Analysis complete via **{model_label}**. Signal: {result.get('signal', 'N/A')} | Confidence: {result.get('confidence', 'N/A')} | Score: {result.get('confluence_score', 'N/A')}/100. Reason: {summary_reason}", symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
+        if result.get('gemini_failure'):
+            add_notification('warning', f"⚠️ **{symbol}**: Gemini was attempted but did not return a usable result ({result['gemini_failure']}). This signal came from the Python fallback; no Gemini result was used.", symbol=symbol)
         if result.get('rejection_reason') == 'RATE_LIMIT':
             st.session_state.rate_limit_hit = True
             next_retry = st.session_state.gpt_rate_limit_until or (datetime.now() + timedelta(seconds=GEMINI_MIN_REQUEST_INTERVAL))
@@ -4513,27 +4519,34 @@ if st.session_state.bot_running:
             st.session_state.analysis_in_progress = True
             st.session_state.analysis_started_at = datetime.now()
             try:
-                update_analysis_status(symbol='SYSTEM', message='Running scheduled analysis...')
+                update_analysis_status(
+                    symbol='SYSTEM',
+                    message='Running scheduled analysis...',
+                    mode='gemini' if ai_due and not is_gpt_rate_limited() else 'python'
+                )
                 render_analysis_status(status_placeholder)
                 progress_bar = st.progress(0)
                 st.session_state.rate_limit_hit = False
+                gemini_completed = False
                 all_data = load_market_data(force_refresh=False)
                 for i, symbol in enumerate(selected_symbols):
                     next_pair = selected_symbols[i + 1] if i + 1 < len(selected_symbols) else None
                     if st.session_state.get('rate_limit_hit', False) or is_gpt_rate_limited() or not ai_due:
                         add_notification('info', f'🐍 {symbol}: Running {PYTHON_FALLBACK_MODEL}.', symbol=symbol)
                         result = _local_fallback(symbol, all_data)
-                        update_analysis_status(symbol=symbol, message=f"Running Python fallback for {symbol}", next_pair=next_pair)
+                        update_analysis_status(symbol=symbol, message=f"Running Python fallback for {symbol}", next_pair=next_pair, mode='python')
                         render_analysis_status(status_placeholder)
                         try:
                             process_symbol_result(result, symbol, is_auto=True, all_data=all_data)
                         except Exception as proc_exc:
                             add_notification('warning', f"❌ {symbol}: result processing failed: {proc_exc}", symbol=symbol)
                     else:
-                        update_analysis_status(symbol=symbol, message=f"Starting scheduled analysis for {symbol}", next_pair=next_pair)
+                        update_analysis_status(symbol=symbol, message=f"Starting Gemini analysis for {symbol}", next_pair=next_pair, mode='gemini')
                         render_analysis_status(status_placeholder)
                         result = analyze_symbol_premium(symbol, all_data, news_override=None)
                         set_cached_analysis(symbol, result)
+                        if str(result.get('model_used', '')).lower().startswith('gemini-'):
+                            gemini_completed = True
                         try:
                             process_symbol_result(result, symbol, is_auto=True, all_data=all_data)
                         except Exception as proc_exc:
@@ -4553,8 +4566,13 @@ if st.session_state.bot_running:
                     run_news_analysis_cycle(target_event, all_data, selected_symbols)
                 st.session_state.last_analysis_time = datetime.now()
                 st.session_state.next_check_time = scheduled_start + timedelta(minutes=ANALYSIS_INTERVAL_MINUTES)
-                next_mode = 'Gemini' if ai_due else 'Python fallback'
-                add_notification('info', f"✅ Scheduled {next_mode} analysis complete. Python fallback runs every {FALLBACK_INTERVAL_MINUTES} minutes; Gemini runs every {AI_ANALYSIS_INTERVAL_MINUTES} minutes. Next tick at {st.session_state.next_check_time.strftime('%H:%M:%S')}.")
+                if ai_due and gemini_completed:
+                    completion = 'Gemini analysis complete'
+                elif ai_due:
+                    completion = 'Gemini unavailable; Python fallback completed'
+                else:
+                    completion = 'Python fallback analysis complete'
+                add_notification('info', f"✅ Scheduled {completion}. Python fallback runs every {FALLBACK_INTERVAL_MINUTES} minutes; Gemini runs every {AI_ANALYSIS_INTERVAL_MINUTES} minutes. Next tick at {st.session_state.next_check_time.strftime('%H:%M:%S')}.")
             finally:
                 st.session_state.analysis_in_progress = False
 with tab2:
